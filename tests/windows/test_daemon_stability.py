@@ -431,6 +431,7 @@ def section_local_cleanup_waits_for_startup_gate(binary, work):
     cache = section_dirs(work, "cleanup-contention")
     env = cli_env(cache)
     env["CBM_LOG_LEVEL"] = "info"
+    env["CBM_LOG_FORMAT"] = "text"
     warm = subprocess.run([binary, "cli", "list_projects"], capture_output=True,
                           timeout=90, env=env)
     if warm.returncode != 0:
@@ -472,7 +473,7 @@ def section_local_cleanup_waits_for_startup_gate(binary, work):
     with open(gates[0], "r+b") as gate, open(err_path, "wb") as errors:
         try:
             process = subprocess.Popen(
-                [binary, "cli", "index_repository"],
+                [binary, "cli", "index_repository", "--progress"],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors, env=env)
             process.stdin.write(json.dumps({"repo_path": repo, "mode": "fast"}).encode())
             process.stdin.close()
@@ -499,7 +500,7 @@ def section_local_cleanup_waits_for_startup_gate(binary, work):
                 raise SetupFailure("index never entered local work:\n" + excerpt(trace))
             while time.monotonic() < deadline:
                 trace = read_trace()
-                if b"msg=pipeline.done" in trace:
+                if b"Completed index_repository (" in trace:
                     break
                 if process.poll() is not None:
                     print("RED: index exited while a live peer held startup-v2:\n" +
@@ -507,9 +508,12 @@ def section_local_cleanup_waits_for_startup_gate(binary, work):
                     return False
                 time.sleep(0.01)
             else:
-                raise SetupFailure("index did not finish its work:\n" + excerpt(trace))
-            # Deliberately exceed the old 500 ms teardown deadline. This is the
-            # collision being tested, not a readiness delay.
+                raise SetupFailure("CLI did not finish its work:\n" + excerpt(trace))
+            # The outer CLI flushes this completion message after receiving
+            # the worker result and closing its daemon session, immediately
+            # before local cleanup. pipeline.done is too early: worker result
+            # handling can outlast a short lock hold. Keep the gate for longer
+            # than the old 500 ms cleanup deadline after this real boundary.
             time.sleep(1)
             stayed_alive = process.poll() is None
             gate.seek(0)
